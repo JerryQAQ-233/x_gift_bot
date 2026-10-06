@@ -91,14 +91,15 @@ export function ManualPaymentPanel({ publicMode = false }: { publicMode?: boolea
     finally { setCancelling(false); }
   }
   async function resumeCurrentQueue() {
-    if (!persistentQueue || resumedQueue.current || !plans.length) return;
+    if (!persistentQueue || resumedQueue.current || !plans.length || inFlight.current) return;
     resumedQueue.current = true;
+    inFlight.current = true; setBusy(true);
     const controller = new AbortController();
     activeRequest.current = controller;
     try {
       let { ok, data, status } = await request<Result>(`${endpoint}/current`, undefined, AbortSignal.any([controller.signal, AbortSignal.timeout(45000)]));
       if (status === 404) return;
-      if (!ok) { if (status === 401) void loadGithub(); else setError(data?.message || "暂时无法恢复排队任务。"); return; }
+      if (!ok) { setNeedsVerification(Boolean(data?.needs_unpaid_verification)); if (status === 401) void loadGithub(); else setError(data?.message || "暂时无法恢复排队任务。"); return; }
       if (data.username) setUsername(data.username);
       if (data.months) setMonths(data.months);
       if (typeof data.ticket === "string" && data.ticket && (data.status === "queued" || data.status === "processing")) {
@@ -111,16 +112,16 @@ export function ManualPaymentPanel({ publicMode = false }: { publicMode?: boolea
           ({ ok, data } = await readQueueWithReconnect(() => request<Result>(queuePath, undefined, AbortSignal.any([controller.signal, AbortSignal.timeout(45000)])), controller.signal));
         }
         queueTicket.current = null;
-        if (!ok) { setError(data?.message || "恢复排队失败，请稍后重试。"); return; }
+        if (!ok) { setNeedsVerification(Boolean(data?.needs_unpaid_verification)); setError(data?.message || "恢复排队失败，请稍后重试。"); return; }
       }
       const finalUser = (data.username || "").toLowerCase();
       const finalPlan = plans.find((p) => p.months === data.months);
       if (!finalUser || !finalPlan || !isPaymentResult(data, finalUser, finalPlan)) { setError("恢复的付款结果不完整，请重新打开页面核实。"); return; }
-      setUsername(data.username); setMonths(data.months); setResult(data); setError("");
+      setUsername(data.username); setMonths(data.months); setNeedsVerification(false); setVerified(false); setResult(data); setError("");
     } catch (e) {
       if (!controller.signal.aborted) setError((e as Error).message || "暂时无法恢复排队任务。");
     } finally {
-      inFlight.current = false; setBusy(false); setQueueProgress({ status: "submitting" }); activeRequest.current = null; queueTicket.current = null;
+      inFlight.current = false; setBusy(false); setQueueProgress({ status: "submitting" }); activeRequest.current = null; queueTicket.current = null; void loadGithub();
     }
   }
   useEffect(() => { if (persistentQueue && plans.length) void resumeCurrentQueue(); }, [persistentQueue, plans.length]);
@@ -154,7 +155,7 @@ export function ManualPaymentPanel({ publicMode = false }: { publicMode?: boolea
       }
       setNeedsVerification(false); setVerified(false); setResult(data);
     } catch (e) { if (!controller.signal.aborted) setError((e as Error).name === "TimeoutError" ? "请求超时，请使用同一用户名和套餐重试，系统会检查已有订单。" : (e as Error).message); }
-    finally { inFlight.current = false; setBusy(false); setQueueProgress({ status: "submitting" }); activeRequest.current = null; queueTicket.current = null; }
+    finally { inFlight.current = false; setBusy(false); setQueueProgress({ status: "submitting" }); activeRequest.current = null; queueTicket.current = null; void loadGithub(); }
   }
   async function copy() {
     if (!result?.checkout_url) return;
@@ -180,8 +181,8 @@ export function ManualPaymentPanel({ publicMode = false }: { publicMode?: boolea
         </DialogActions>
       </Dialog>
       {planError && <Alert severity="error" sx={{ mb: 2 }} action={<Button color="inherit" onClick={() => void loadPlans()}>重新加载</Button>}>{planError}</Alert>}
-      {publicMode && github?.enabled && !github.authenticated && <Alert severity="info" sx={{ mb: 2 }} action={<Button color="inherit" component="a" href="/auth/github">使用 GitHub 登录</Button>}>为防止付款链接被滥用，生成链接前需要绑定 GitHub。账号注册需超过 {github.min_account_age_days} 天；每个账号最多绑定 {github.max_x_accounts || "不限"} 个 X 账号；{github.attempt_window_hours || 0} 小时内最多 {github.max_attempts || "不限"} 次；每次开始排队后冷却 {github.cooldown_minutes} 分钟。</Alert>}
-      {publicMode && github?.enabled && github.authenticated && <Alert severity="success" sx={{ mb: 2 }} action={<Button color="inherit" disabled={busy} onClick={() => void logoutGithub()}>退出</Button>}>已绑定 GitHub @{github.login}。本周期已使用 {github.attempts_in_window ?? 0}/{github.max_attempts || "∞"} 次；已绑定 {github.bound_x_accounts ?? 0}/{github.max_x_accounts || "∞"} 个 X 账号。</Alert>}
+      {publicMode && github?.enabled && !github.authenticated && <Alert severity="info" sx={{ mb: 2, "& .MuiAlert-message": { minWidth: 0, width: "100%" } }}><Typography variant="body2">为防止付款链接被滥用，生成链接前需要绑定 GitHub。账号注册需超过 {github.min_account_age_days} 天；每个账号最多绑定 {github.max_x_accounts || "不限"} 个 X 账号；{github.attempt_window_hours || 0} 小时内最多 {github.max_attempts || "不限"} 次；每次开始排队后冷却 {github.cooldown_minutes} 分钟。</Typography><Button variant="outlined" color="inherit" component="a" href="/auth/github" sx={{ mt: 2, whiteSpace: "nowrap" }}>使用 GitHub 登录</Button></Alert>}
+      {publicMode && github?.enabled && github.authenticated && <Alert severity="success" sx={{ mb: 2, "& .MuiAlert-action": { flexShrink: 0 } }} action={<Button sx={{ whiteSpace: "nowrap" }} color="inherit" disabled={busy} onClick={() => void logoutGithub()}>退出</Button>}>已绑定 GitHub @{github.login}。本周期已使用 {github.attempts_in_window ?? 0}/{github.max_attempts || "∞"} 次；已绑定 {github.bound_x_accounts ?? 0}/{github.max_x_accounts || "∞"} 个 X 账号。</Alert>}
       {!(publicMode && (busy || result)) && !(publicMode && github?.enabled && !github.authenticated) && <Box component="form" onSubmit={(e) => { e.preventDefault(); if (publicMode) setConfirmOpen(true); else void generate(); }} aria-busy={busy}>
         <Box sx={{
           display: "grid",

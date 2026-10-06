@@ -36,43 +36,7 @@ func (s *server) manualLinkPlans(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) publicLinkPlans(w http.ResponseWriter, r *http.Request) {
 	if !s.github.Enabled {
-		if c, err := r.Cookie("__Host-xgift-link"); err != nil || !regexp.MustCompile(`^[a-f0-9]{64}package site
-
-import (
-	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"errors"
-	"log"
-	"net/http"
-	"os"
-	"regexp"
-	"strconv"
-	"strings"
-	"syscall"
-	"time"
-	"xgift/internal/checkout"
-)
-
-func (s *server) manualLinkPlans(w http.ResponseWriter, r *http.Request) {
-	cat, err := checkout.ReadCatalog(s.vault)
-	if err != nil {
-		message(w, 503, "套餐配置暂不可用。")
-		return
-	}
-	type plan struct {
-		Months   int    `json:"months"`
-		Amount   int    `json:"amount"`
-		Currency string `json:"currency"`
-	}
-	plans := make([]plan, 0, len(cat.Plans))
-	for _, p := range cat.Plans {
-		plans = append(plans, plan{p.Months, p.Amount, strings.ToUpper(cat.Currency)})
-	}
-	reply(w, 200, map[string]any{"plans": plans})
-}
-
-).MatchString(c.Value) {
+		if c, err := r.Cookie("__Host-xgift-link"); err != nil || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(c.Value) {
 			var b [32]byte
 			if _, err = rand.Read(b[:]); err != nil {
 				message(w, 503, "请稍后重试。")
@@ -85,7 +49,9 @@ func (s *server) manualLinkPlans(w http.ResponseWriter, r *http.Request) {
 }
 func (s *server) publicLink(w http.ResponseWriter, r *http.Request) {
 	owner, ok := s.publicLinkOwner(w, r)
-	if !ok { return }
+	if !ok {
+		return
+	}
 	s.generateManualLink(w, r, owner)
 }
 func (s *server) manualLink(w http.ResponseWriter, r *http.Request) {

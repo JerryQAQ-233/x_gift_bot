@@ -165,7 +165,9 @@ func (q *publicLinkQueue) respond(w http.ResponseWriter, job *publicLinkJob) {
 
 func (s *server) publicLinkQueueStatus(w http.ResponseWriter, r *http.Request) {
 	owner, ok := s.publicLinkOwner(w, r)
-	if !ok { return }
+	if !ok {
+		return
+	}
 	q := &s.linkQueue
 	q.mu.Lock()
 	s.refreshPublicLinkWait(time.Now())
@@ -178,7 +180,7 @@ func (s *server) publicLinkQueueStatus(w http.ResponseWriter, r *http.Request) {
 				request := j.request
 				q.mu.Unlock()
 				// A delayed poll revalidates its link; it must never create or switch plans.
-				if s.tryServePublicLink(w, r, request, c.Value, false) {
+				if s.tryServePublicLink(w, r, request, owner, false) {
 					return
 				}
 				message(w, 409, "付款链接已更新或失效，请重新获取。")
