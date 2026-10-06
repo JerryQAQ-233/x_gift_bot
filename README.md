@@ -93,6 +93,33 @@ sudo systemctl enable --now xgift
 | `XGIFT_PASSWORD_FILE` | 保管库密码文件路径 |
 | `XGIFT_ADMIN_PASSWORD_FILE` | 后台密码文件路径 |
 | `XGIFT_PAYMENTS_ENABLED` | `true` 开放充值，`false` 暂停（不消耗兑换码） |
+| `XGIFT_GITHUB_AUTH_ENABLED` | `true` 时公开手动付款链接必须先通过 GitHub OAuth |
+| `XGIFT_GITHUB_CLIENT_ID` | GitHub OAuth App Client ID |
+| `XGIFT_GITHUB_CLIENT_SECRET_FILE` | GitHub OAuth App Client Secret 的 0600 私密文件 |
+| `XGIFT_GITHUB_MIN_ACCOUNT_AGE_DAYS` | GitHub 最小账号年龄，默认 `180`；`0` 关闭 |
+| `XGIFT_GITHUB_MAX_X_ACCOUNTS` | 每个 GitHub 最多绑定的 X 账号数，默认 `3`；`0` 不限 |
+| `XGIFT_GITHUB_ATTEMPT_WINDOW_HOURS` | 生成次数统计窗口，默认 `24` 小时 |
+| `XGIFT_GITHUB_MAX_ATTEMPTS` | 窗口内最多开始排队次数，默认 `5`；`0` 不限 |
+| `XGIFT_GITHUB_COOLDOWN_MINUTES` | 每次开始排队后的冷却时间，默认 `30` 分钟；`0` 关闭 |
+| `XGIFT_GITHUB_MAX_CONCURRENT_QUEUE` | 每个 GitHub 同时排队任务上限，默认 `1`；`0` 不限 |
+| `XGIFT_GITHUB_SESSION_HOURS` | GitHub 登录会话有效期，默认 `168` 小时 |
+
+
+### GitHub 防滥用（公开手动付款链接）
+
+将 `XGIFT_GITHUB_AUTH_ENABLED=true` 后，只有通过 GitHub OAuth 的用户可以调用公开 `/api/manual-link`。OAuth 只申请 `read:user`，服务端仅把 GitHub numeric user ID、login、账号创建时间和过期时间写进签名 Session Cookie；OAuth access token 在读取 `/user` 后不会持久化。
+
+Issue #5 的限制全部由环境变量控制：账号年龄、可绑定 X 账号数、次数统计窗口、窗口内最大尝试次数、两次开始排队之间的冷却时间、同时排队数和登录 Session 时长。一次尝试在**真正加入队列时**计数，因此即使后续上游生成失败也会占用额度；读取已有付款链接或刷新页面恢复已有 ticket 不重复计数。
+
+开启 GitHub 模式后，队列 owner 使用 GitHub numeric user ID，而不是浏览器随机 cookie。刷新或关闭页面不会主动取消服务端 ticket；重新登录同一个 GitHub 账号并打开页面后，会通过 `/api/manual-link/current` 恢复当前排队/生成结果。主动点击「放弃排队」仍会取消 ticket，但已经发生的尝试不会退还。
+
+GitHub OAuth App 的 callback URL 必须精确设置为：
+
+```text
+https://你的域名/auth/github/callback
+```
+
+Client Secret 请保存为 0600 文件，例如 `/etc/xgift/github-client-secret`，不要直接写进 `site.env` 或提交到仓库。
 
 ### 第五步：配置 HTTPS 反向代理
 

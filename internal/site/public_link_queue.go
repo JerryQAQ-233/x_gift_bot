@@ -37,7 +37,8 @@ type publicLinkQueue struct {
 func (q *publicLinkQueue) prune(now time.Time) {
 	keep := q.jobs[:0]
 	for _, j := range q.jobs {
-		if j.state == "queued" && (j.cancelled || now.Sub(j.seen) > 90*time.Second) {
+		_, githubOwned := parseGithubOwner(j.owner)
+		if j.state == "queued" && (j.cancelled || (!githubOwned && now.Sub(j.seen) > 90*time.Second)) {
 			continue
 		}
 		if j.state == "done" && now.Sub(j.finished) > 15*time.Minute {
@@ -79,6 +80,9 @@ func (s *server) enqueuePublicLink(w http.ResponseWriter, request manualLinkRequ
 	}
 	if len(q.jobs) >= 500 {
 		message(w, 503, "当前排队人数较多，请稍后重试。")
+		return
+	}
+	if !s.admitGithubPublicLink(w, owner, request.Username) {
 		return
 	}
 	j := &publicLinkJob{id: token(24), owner: owner, request: request, state: "queued", seen: now}
@@ -156,21 +160,18 @@ func (q *publicLinkQueue) respond(w http.ResponseWriter, job *publicLinkJob) {
 	if job.state == "processing" {
 		msg = fmt.Sprintf("正在生成付款链接，预计还需约 %s。", waitText)
 	}
-	reply(w, http.StatusAccepted, map[string]any{"ticket": job.id, "status": job.state, "position": position, "ahead": position - 1, "estimated_wait_seconds": seconds, "message": msg})
+	reply(w, http.StatusAccepted, map[string]any{"ticket": job.id, "status": job.state, "position": position, "ahead": position - 1, "estimated_wait_seconds": seconds, "message": msg, "username": job.request.Username, "months": job.request.Months})
 }
 
 func (s *server) publicLinkQueueStatus(w http.ResponseWriter, r *http.Request) {
-	c, err := r.Cookie("__Host-xgift-link")
-	if err != nil {
-		message(w, 404, "排队记录已失效，请重新提交。")
-		return
-	}
+	owner, ok := s.publicLinkOwner(w, r)
+	if !ok { return }
 	q := &s.linkQueue
 	q.mu.Lock()
 	s.refreshPublicLinkWait(time.Now())
 	q.prune(time.Now())
 	for _, j := range q.jobs {
-		if j.id == r.PathValue("ticket") && j.owner == c.Value && !j.cancelled {
+		if j.id == r.PathValue("ticket") && j.owner == owner && !j.cancelled {
 			j.seen = time.Now()
 			q.dirty = true
 			if j.state == "done" && j.code == 200 && time.Since(j.finished) >= 15*time.Second {

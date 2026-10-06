@@ -44,6 +44,7 @@ type server struct {
 	turnstileSiteKey string
 	turnstileSecret  string
 	turnstileHTTP    *http.Client
+	github           githubAuthConfig
 	db               *sql.DB
 	vault            *vault.Vault
 	origin           string
@@ -115,6 +116,9 @@ func Run(ctx context.Context) error {
 	}
 	s := &server{origin: origin, adminHash: sha256.Sum256(admin), payments: os.Getenv("XGIFT_PAYMENTS_ENABLED") == "true", lockPath: filepath.Join(dir, "checkout.lock"), work: make(chan struct{}, 1), checks: make(chan struct{}, 4), ctx: ctx, limits: map[string]limit{}}
 	clear(admin)
+	if err = s.configureGithub(); err != nil {
+		return err
+	}
 	if err = s.configureTurnstile(); err != nil {
 		return err
 	}
@@ -196,6 +200,9 @@ func Run(ctx context.Context) error {
 	if err = migrateBatches(db); err != nil {
 		return err
 	}
+	if err = migrateGithubAbuse(db); err != nil {
+		return err
+	}
 	// A crash is never interpreted as permission to submit the same payment again.
 	if _, err = db.Exec("UPDATE codes SET status='review',message=?,updated=? WHERE status='processing'", "订单处理被中断，请查询原订单或联系管理员核实；请勿重复兑换。", time.Now().Unix()); err != nil {
 		return err
@@ -234,9 +241,14 @@ func Run(ctx context.Context) error {
 		reply(w, 200, map[string]any{"ok": true, "payments_enabled": ready})
 	})
 	mux.HandleFunc("GET /api/security", s.securityConfig)
+	mux.HandleFunc("GET /api/github/status", s.githubStatus)
+	mux.HandleFunc("GET /auth/github", s.githubLogin)
+	mux.HandleFunc("GET /auth/github/callback", s.githubCallback)
+	mux.HandleFunc("POST /api/github/logout", s.githubLogout)
 	mux.HandleFunc("POST /api/redeem", s.human("redeem", s.redeem))
 	mux.HandleFunc("GET /api/manual-link/plans", s.publicLinkPlans)
 	mux.HandleFunc("POST /api/manual-link", s.human("manual_link", s.publicLink))
+	mux.HandleFunc("GET /api/manual-link/current", s.publicLinkQueueCurrent)
 	mux.HandleFunc("GET /api/manual-link/queue/{ticket}", s.publicLinkQueueStatus)
 	mux.HandleFunc("POST /api/manual-link/queue/{ticket}/cancel", s.cancelPublicLinkQueue)
 	mux.HandleFunc("POST /api/status", s.status)

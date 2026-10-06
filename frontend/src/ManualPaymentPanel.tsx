@@ -12,6 +12,7 @@ import { isPaymentResult } from "./manualPaymentResult";
 
 type Plan = { months: number; amount: number; currency: string };
 type Result = Plan & { username: string; status: string; checkout_url?: string; expires_at?: number; message?: string; needs_unpaid_verification?: boolean; ticket?: string; position?: number; ahead?: number; estimated_wait_seconds?: number };
+type GithubStatus = { enabled: boolean; authenticated: boolean; login?: string; min_account_age_days: number; max_x_accounts: number; attempt_window_hours: number; max_attempts: number; cooldown_minutes: number; max_concurrent_queue: number; session_hours: number; bound_x_accounts?: number; attempts_in_window?: number; remaining_x_accounts?: number; remaining_attempts?: number; next_allowed_at?: number };
 function price(p: Plan) { return `${p.currency} ${(p.amount / 100).toFixed(2)}`; }
 export function ManualPaymentPanel({ publicMode = false }: { publicMode?: boolean }) {
   const endpoint = publicMode ? "/api/manual-link" : "/api/admin/manual-link";
@@ -33,6 +34,8 @@ export function ManualPaymentPanel({ publicMode = false }: { publicMode?: boolea
   const queueTicket = useRef<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [github, setGithub] = useState<GithubStatus | null>(null);
+  const resumedQueue = useRef(false);
   const cleanUser = username.trim().replace(/^@/, "").toLowerCase();
   const valid = /^[a-z0-9_]{1,15}$/.test(cleanUser);
   async function loadPlans() {
@@ -44,11 +47,20 @@ export function ManualPaymentPanel({ publicMode = false }: { publicMode?: boolea
       if (!data.plans.length) setPlanError("暂无可用套餐。");
     } catch (e) { setPlanError((e as Error).message); }
   }
-  useEffect(() => { void loadPlans(); }, []);
+  async function loadGithub() {
+    if (!publicMode) return;
+    try {
+      const state = await adminApi<GithubStatus>("/api/github/status");
+      setGithub(state);
+      if (!state.authenticated) resumedQueue.current = false;
+    } catch { setGithub(null); }
+  }
+  useEffect(() => { void loadPlans(); void loadGithub(); }, []);
+  const persistentQueue = Boolean(publicMode && github?.enabled && github.authenticated);
   useEffect(() => {
     const leave = () => {
       const ticket = queueTicket.current;
-      if (ticket) {
+      if (ticket && !persistentQueue) {
         const url = `/api/manual-link/queue/${encodeURIComponent(ticket)}/cancel`;
         if (!navigator.sendBeacon(url, "")) void fetch(url, { method: "POST", keepalive: true, credentials: "same-origin" }).catch(() => {});
         queueTicket.current = null;
@@ -56,12 +68,12 @@ export function ManualPaymentPanel({ publicMode = false }: { publicMode?: boolea
       }
     };
     const returned = (event: PageTransitionEvent) => {
-      if (event.persisted) { setBusy(false); setCancelling(false); inFlight.current = false; setNotice("已退出排队，可以重新提交。"); }
+      if (event.persisted && !persistentQueue) { setBusy(false); setCancelling(false); inFlight.current = false; setNotice("已退出排队，可以重新提交。"); }
     };
     window.addEventListener("pagehide", leave);
     window.addEventListener("pageshow", returned);
     return () => { leave(); activeRequest.current?.abort(); window.removeEventListener("pagehide", leave); window.removeEventListener("pageshow", returned); };
-  }, []);
+  }, [persistentQueue]);
   async function cancelQueue() {
     const ticket = queueTicket.current;
     if (!ticket || cancelling) return;
@@ -77,6 +89,44 @@ export function ManualPaymentPanel({ publicMode = false }: { publicMode?: boolea
       }
     } catch { setError("暂时无法退出排队，请重试。"); }
     finally { setCancelling(false); }
+  }
+  async function resumeCurrentQueue() {
+    if (!persistentQueue || resumedQueue.current || !plans.length) return;
+    resumedQueue.current = true;
+    const controller = new AbortController();
+    activeRequest.current = controller;
+    try {
+      let { ok, data, status } = await request<Result>(`${endpoint}/current`, undefined, AbortSignal.any([controller.signal, AbortSignal.timeout(45000)]));
+      if (status === 404) return;
+      if (!ok) { if (status === 401) void loadGithub(); else setError(data?.message || "暂时无法恢复排队任务。"); return; }
+      if (data.username) setUsername(data.username);
+      if (data.months) setMonths(data.months);
+      if (typeof data.ticket === "string" && data.ticket && (data.status === "queued" || data.status === "processing")) {
+        inFlight.current = true; setBusy(true); queueTicket.current = data.ticket;
+        while (ok && typeof data?.ticket === "string" && data.ticket && (data.status === "queued" || data.status === "processing")) {
+          setQueueProgress({ status: data.status as "queued" | "processing", ahead: data.ahead ?? Math.max(0, (data.position ?? 1) - 1), estimated_wait_seconds: data.estimated_wait_seconds });
+          await new Promise<void>((resolve) => setTimeout(resolve, 3000));
+          controller.signal.throwIfAborted();
+          const queuePath = `${endpoint}/queue/${encodeURIComponent(data.ticket)}`;
+          ({ ok, data } = await readQueueWithReconnect(() => request<Result>(queuePath, undefined, AbortSignal.any([controller.signal, AbortSignal.timeout(45000)])), controller.signal));
+        }
+        queueTicket.current = null;
+        if (!ok) { setError(data?.message || "恢复排队失败，请稍后重试。"); return; }
+      }
+      const finalUser = (data.username || "").toLowerCase();
+      const finalPlan = plans.find((p) => p.months === data.months);
+      if (!finalUser || !finalPlan || !isPaymentResult(data, finalUser, finalPlan)) { setError("恢复的付款结果不完整，请重新打开页面核实。"); return; }
+      setUsername(data.username); setMonths(data.months); setResult(data); setError("");
+    } catch (e) {
+      if (!controller.signal.aborted) setError((e as Error).message || "暂时无法恢复排队任务。");
+    } finally {
+      inFlight.current = false; setBusy(false); setQueueProgress({ status: "submitting" }); activeRequest.current = null; queueTicket.current = null;
+    }
+  }
+  useEffect(() => { if (persistentQueue && plans.length) void resumeCurrentQueue(); }, [persistentQueue, plans.length]);
+  async function logoutGithub() {
+    if (busy) return;
+    try { await request("/api/github/logout", {}); } finally { setGithub(null); resumedQueue.current = false; await loadGithub(); }
   }
   useEffect(() => { if (result && publicMode) resultHeading.current?.focus({ preventScroll: true }); }, [result, publicMode]);
   useEffect(() => { if (!busy && error) usernameInput.current?.focus({ preventScroll: true }); }, [busy, error]);
@@ -122,7 +172,7 @@ export function ManualPaymentPanel({ publicMode = false }: { publicMode?: boolea
         <DialogTitle id="confirm-payment-title">确认生成付款链接？</DialogTitle>
         <DialogContent>
           <DialogContentText id="confirm-payment-description" color="text.primary">如果不想要付款，请不要点击生成链接。</DialogContentText>
-          <DialogContentText sx={{ mt: 2 }}>退出网站会自动退出排队。</DialogContentText>
+          <DialogContentText sx={{ mt: 2 }}>{persistentQueue ? "刷新或关闭页面不会取消排队，重新打开后会自动恢复。" : "退出网站会自动退出排队。"}</DialogContentText>
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2.5, gap: 1 }}>
           <Button onClick={() => setConfirmOpen(false)}>暂不生成</Button>
@@ -130,7 +180,9 @@ export function ManualPaymentPanel({ publicMode = false }: { publicMode?: boolea
         </DialogActions>
       </Dialog>
       {planError && <Alert severity="error" sx={{ mb: 2 }} action={<Button color="inherit" onClick={() => void loadPlans()}>重新加载</Button>}>{planError}</Alert>}
-      {!(publicMode && (busy || result)) && <Box component="form" onSubmit={(e) => { e.preventDefault(); if (publicMode) setConfirmOpen(true); else void generate(); }} aria-busy={busy}>
+      {publicMode && github?.enabled && !github.authenticated && <Alert severity="info" sx={{ mb: 2 }} action={<Button color="inherit" component="a" href="/auth/github">使用 GitHub 登录</Button>}>为防止付款链接被滥用，生成链接前需要绑定 GitHub。账号注册需超过 {github.min_account_age_days} 天；每个账号最多绑定 {github.max_x_accounts || "不限"} 个 X 账号；{github.attempt_window_hours || 0} 小时内最多 {github.max_attempts || "不限"} 次；每次开始排队后冷却 {github.cooldown_minutes} 分钟。</Alert>}
+      {publicMode && github?.enabled && github.authenticated && <Alert severity="success" sx={{ mb: 2 }} action={<Button color="inherit" disabled={busy} onClick={() => void logoutGithub()}>退出</Button>}>已绑定 GitHub @{github.login}。本周期已使用 {github.attempts_in_window ?? 0}/{github.max_attempts || "∞"} 次；已绑定 {github.bound_x_accounts ?? 0}/{github.max_x_accounts || "∞"} 个 X 账号。</Alert>}
+      {!(publicMode && (busy || result)) && !(publicMode && github?.enabled && !github.authenticated) && <Box component="form" onSubmit={(e) => { e.preventDefault(); if (publicMode) setConfirmOpen(true); else void generate(); }} aria-busy={busy}>
         <Box sx={{
           display: "grid",
           gridTemplateColumns: { xs: "minmax(0, 1fr)", sm: "minmax(0, 1fr) minmax(0, 1fr)", md: publicMode ? "minmax(0, 1fr) minmax(0, 1fr)" : "minmax(260px, 1fr) minmax(235px, 320px) auto" },
@@ -145,7 +197,7 @@ export function ManualPaymentPanel({ publicMode = false }: { publicMode?: boolea
         </Box>
         {needsVerification && <FormControlLabel control={<Checkbox checked={verified} disabled={busy} onChange={(e) => setVerified(e.target.checked)} />} label="我已核实原订单未付款，也没有正在处理的扣款或银行验证，允许生成新链接" />}
       </Box>}
-      {publicMode && busy && <PaymentQueueCard onCancel={queueProgress.status === "submitting" ? undefined : () => void cancelQueue()} cancelling={cancelling} progress={queueProgress} username={cleanUser} months={months} price={plans.find((p) => p.months === months) ? price(plans.find((p) => p.months === months)!) : ""} />}
+      {publicMode && busy && <PaymentQueueCard persistent={persistentQueue} onCancel={queueProgress.status === "submitting" ? undefined : () => void cancelQueue()} cancelling={cancelling} progress={queueProgress} username={cleanUser} months={months} price={plans.find((p) => p.months === months) ? price(plans.find((p) => p.months === months)!) : ""} />}
       {!publicMode && busy && <LinearProgress aria-label="正在核对账号并生成付款链接" sx={{ mt: 1 }} />}
       {error && <Alert severity="error" sx={{ mt: 2 }}>{error}</Alert>}
       {publicMode && result && <Card variant="outlined" sx={{ borderRadius: 2, bgcolor: "background.paper" }}>

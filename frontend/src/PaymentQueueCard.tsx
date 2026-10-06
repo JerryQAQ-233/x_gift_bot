@@ -9,13 +9,14 @@ export type QueueProgress = {
   estimated_wait_seconds?: number;
 };
 
-export function PaymentQueueCard({ progress, username, months, price, onCancel, cancelling }: {
+export function PaymentQueueCard({ progress, username, months, price, onCancel, cancelling, persistent = false }: {
   progress: QueueProgress;
   username: string;
   months: number;
   price: string;
   onCancel?: () => void;
   cancelling?: boolean;
+  persistent?: boolean;
 }) {
   const card = useRef<HTMLDivElement>(null);
   useEffect(() => { card.current?.focus({ preventScroll: true }); }, []);
@@ -71,7 +72,7 @@ export function PaymentQueueCard({ progress, username, months, price, onCancel, 
         </Stack>
         <Stack direction="row" spacing={0.75} alignItems="flex-start" sx={{ mt: 2 }}>
           <LockOutlined sx={{ fontSize: 16, color: "text.secondary", mt: "3px" }} aria-hidden="true" />
-          <Typography variant="caption" color="text.secondary">离开此页面将自动退出排队。生成链接不会扣款。</Typography>
+          <Typography variant="caption" color="text.secondary">{persistent ? "刷新或关闭页面不会取消排队，重新打开后可继续查看。生成链接不会扣款。" : "离开此页面将自动退出排队。生成链接不会扣款。"}</Typography>
         </Stack>
         {onCancel && <Button variant="outlined" fullWidth onClick={onCancel} disabled={cancelling} sx={{ mt: 2, minHeight: 44 }}>{cancelling ? "正在退出…" : "放弃排队"}</Button>}
       </CardContent>

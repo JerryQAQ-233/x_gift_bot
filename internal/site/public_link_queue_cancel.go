@@ -5,16 +5,13 @@ import "net/http"
 // The middleware enforces same-origin POSTs. Both the opaque ticket and browser
 // cookie must match; no username-only cancellation or deletion of orders.
 func (s *server) cancelPublicLinkQueue(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie("__Host-xgift-link")
-	if err != nil {
-		message(w, 404, "排队记录不存在。")
-		return
-	}
+	owner, ok := s.publicLinkOwner(w, r)
+	if !ok { return }
 	q := &s.linkQueue
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	for i, j := range q.jobs {
-		if j.id != r.PathValue("ticket") || j.owner != cookie.Value {
+		if j.id != r.PathValue("ticket") || j.owner != owner {
 			continue
 		}
 		if j.state == "done" {
